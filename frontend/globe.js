@@ -182,7 +182,7 @@ function updatePlanes(flights) {
     }
 
     // Scale based on camera distance for consistent apparent size
-    plane.scale.setScalar(1.8);
+    plane.scale.setScalar(4.5);
   });
 
   // Remove stale planes
@@ -231,7 +231,7 @@ function selectFlight(f) {
         child.material.emissive?.setHex(color);
       }
     });
-    p.scale.setScalar(isSelected ? 3.2 : 1.8);
+    p.scale.setScalar(isSelected ? 6.5 : 4.5);
   });
 
   // Smoothly spin globe to face this flight
