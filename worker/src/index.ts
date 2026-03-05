@@ -8,41 +8,37 @@ export interface Env {
 }
 
 interface FlightState {
-  // flights the user has pinned/bookmarked
   trackedCallsigns: string[];
-  // last N chat messages for LLM context
   chatHistory: { role: "user" | "assistant"; content: string }[];
-  // cached snapshot of live flights (refreshed every ~10s by the frontend)
-  lastFlightSnapshot: string; // JSON string of up to 50 nearby flights
+  lastFlightSnapshot: string;
 }
 
-// ─── OpenSky helpers ──────────────────────────────────────────────────────────
+// ─── AviationStack fetch ──────────────────────────────────────────────────────
 
-const OPENSKY_URL = "https://opensky-network.org/api/states/all";
+const AVIATION_KEY = "acc86a44ca55250ec740993818340170";
 
-// OpenSky state vector indices (positional array)
-const IDX = {
-  icao24: 0, callsign: 1, origin_country: 2,
-  time_position: 3, last_contact: 4,
-  longitude: 5, latitude: 6, baro_altitude: 7,
-  on_ground: 8, velocity: 9, true_track: 10,
-  vertical_rate: 11, sensors: 12, geo_altitude: 13,
-  squawk: 14, spi: 15, position_source: 16,
-};
+async function fetchLiveFlights(): Promise<object[]> {
+  const url = `https://api.aviationstack.com/v1/flights?access_key=${AVIATION_KEY}&flight_status=active&limit=100`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`AviationStack ${res.status}`);
+  const data: any = await res.json();
+  if (!data.data) throw new Error("No flight data returned");
 
-function parseStates(raw: any[][]): object[] {
-  return raw
-    .filter(s => s[IDX.latitude] != null && s[IDX.longitude] != null && !s[IDX.on_ground])
-    .map(s => ({
-      icao24:          s[IDX.icao24],
-      callsign:        (s[IDX.callsign] || "").trim(),
-      origin_country:  s[IDX.origin_country],
-      lat:             s[IDX.latitude],
-      lon:             s[IDX.longitude],
-      altitude_m:      s[IDX.baro_altitude],
-      velocity_ms:     s[IDX.velocity],
-      heading:         s[IDX.true_track],
-      vertical_rate:   s[IDX.vertical_rate],
+  return data.data
+    .filter((f: any) => f.live && f.live.latitude != null && f.live.longitude != null)
+    .map((f: any) => ({
+      icao24:         f.flight?.icao || f.flight?.iata || "unknown",
+      callsign:       f.flight?.icao || f.flight?.iata || "",
+      origin_country: f.airline?.name || "Unknown",
+      lat:            f.live.latitude,
+      lon:            f.live.longitude,
+      altitude_m:     f.live.altitude,
+      velocity_ms:    f.live.speed_horizontal ? f.live.speed_horizontal / 3.6 : null,
+      heading:        f.live.direction,
+      vertical_rate:  f.live.speed_vertical ? f.live.speed_vertical / 60 : null,
+      departure:      f.departure?.airport || null,
+      arrival:        f.arrival?.airport || null,
+      airline:        f.airline?.name || null,
     }));
 }
 
@@ -50,14 +46,12 @@ function parseStates(raw: any[][]): object[] {
 
 export class FlightAgent extends Agent<Env, FlightState> {
 
-  // Default state (first time this agent runs for a user)
   initialState: FlightState = {
     trackedCallsigns: [],
     chatHistory: [],
     lastFlightSnapshot: "[]",
   };
 
-  // HTTP router — all requests to the worker arrive here
   async onRequest(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const cors = {
@@ -68,23 +62,12 @@ export class FlightAgent extends Agent<Env, FlightState> {
 
     if (req.method === "OPTIONS") return new Response(null, { headers: cors });
 
-    // ── GET /flights — proxy OpenSky, cache in agent state ──────────────────
+    // ── GET /flights ─────────────────────────────────────────────────────────
     if (url.pathname === "/flights" && req.method === "GET") {
       try {
-        const res = await fetch(OPENSKY_URL, {
-          headers: { "User-Agent": "CloudflareFlightTracker/1.0" },
-          // 10 second cache so we don't hammer OpenSky
-          cf: { cacheTtl: 10 },
-        });
-        if (!res.ok) throw new Error(`OpenSky ${res.status}`);
-        const data: { states: any[][] } = await res.json();
-        const flights = parseStates(data.states || []);
-
-        // Persist a small snapshot (first 100 airborne flights) in agent state
-        // so the LLM has context without us passing the whole world every time
+        const flights = await fetchLiveFlights();
         const snapshot = flights.slice(0, 100);
         this.setState({ ...this.state, lastFlightSnapshot: JSON.stringify(snapshot) });
-
         return new Response(JSON.stringify({ flights }), {
           headers: { ...cors, "Content-Type": "application/json" },
         });
@@ -96,7 +79,7 @@ export class FlightAgent extends Agent<Env, FlightState> {
       }
     }
 
-    // ── POST /track — pin/unpin a callsign ───────────────────────────────────
+    // ── POST /track ──────────────────────────────────────────────────────────
     if (url.pathname === "/track" && req.method === "POST") {
       const { callsign, action } = await req.json<{ callsign: string; action: "add" | "remove" }>();
       let tracked = [...(this.state.trackedCallsigns || [])];
@@ -108,43 +91,32 @@ export class FlightAgent extends Agent<Env, FlightState> {
       });
     }
 
-    // ── GET /tracked — return pinned callsigns ───────────────────────────────
+    // ── GET /tracked ─────────────────────────────────────────────────────────
     if (url.pathname === "/tracked" && req.method === "GET") {
       return new Response(JSON.stringify({ trackedCallsigns: this.state.trackedCallsigns }), {
         headers: { ...cors, "Content-Type": "application/json" },
       });
     }
 
-    // ── POST /chat — LLM chat with flight context ────────────────────────────
+    // ── POST /chat ───────────────────────────────────────────────────────────
     if (url.pathname === "/chat" && req.method === "POST") {
       const { message } = await req.json<{ message: string }>();
-
-      // Build history (keep last 10 turns to stay within context limits)
       const history = (this.state.chatHistory || []).slice(-10);
-
-      // Give the LLM a snapshot of current flights as context
       const snapshot = JSON.parse(this.state.lastFlightSnapshot || "[]");
       const flightContext = snapshot.length
-        ? `Here is a sample of ${snapshot.length} currently airborne flights (from OpenSky live data):\n${JSON.stringify(snapshot.slice(0, 20), null, 2)}`
+        ? `Here is a sample of ${snapshot.length} currently active flights:\n${JSON.stringify(snapshot.slice(0, 20), null, 2)}`
         : "No live flight snapshot is currently available.";
 
       const systemPrompt = `You are an expert aviation AI assistant embedded in a live 3D global flight tracker.
-You have access to real-time ADS-B data from the OpenSky Network.
+You have access to real-time flight data from AviationStack.
 
 ${flightContext}
 
-The user's tracked (bookmarked) callsigns: ${JSON.stringify(this.state.trackedCallsigns || [])}.
+The user's tracked callsigns: ${JSON.stringify(this.state.trackedCallsigns || [])}.
 
-You can help with:
-- Questions about specific flights (callsign, altitude, speed, heading, country)
-- Airport and route information
-- Aviation terminology and concepts
-- Interpreting flight data
+Help with questions about specific flights, airports, routes, and aviation in general.
+Be concise and helpful. If asked about a specific callsign, search the flight data above first.`;
 
-Always be concise and helpful. If asked about a specific callsign, search the flight data above first.
-`;
-
-      // Call Llama 3.3 on Workers AI
       const messages = [
         ...history,
         { role: "user" as const, content: message },
@@ -156,8 +128,6 @@ Always be concise and helpful. If asked about a specific callsign, search the fl
       ) as { response?: string };
 
       const reply = aiResponse.response || "Sorry, I couldn't process that request.";
-
-      // Persist chat history
       const updatedHistory = [
         ...history,
         { role: "user" as const, content: message },
@@ -175,12 +145,9 @@ Always be concise and helpful. If asked about a specific callsign, search the fl
 }
 
 // ─── Worker entrypoint ────────────────────────────────────────────────────────
-// Every request is routed to the same named agent instance ("global")
-// so state is shared/persistent across all sessions.
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
-    // Route all traffic to a single named agent instance
     const agent = await getAgentByName<FlightAgent>(env.FlightAgent, "global");
     return agent.fetch(req);
   },
