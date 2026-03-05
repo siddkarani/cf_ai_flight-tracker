@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "flight-tracker-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Workers AI binding — gives us Llama 3.3 for free
+  "ai": {
+    "binding": "AI"
+  },
+
+  // Durable Objects — the Agent's persistent state/memory store
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "FlightAgent",
+        "class_name": "FlightAgent"
+      }
+    ]
+  },
+
+  // Required: tell Cloudflare this Durable Object uses SQLite
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["FlightAgent"]
+    }
+  ]
+}
