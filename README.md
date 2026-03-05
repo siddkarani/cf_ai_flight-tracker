@@ -6,25 +6,54 @@ Track every plane in the sky on an interactive 3D globe, chat with an AI assista
 
 ---
 
+## Live Demo
+
+Frontend: https://flight-tracker-bmy.pages.dev
+
+Worker API: https://flight-tracker-worker.sidd-karani06.workers.dev
+
+---
+
+## Assignment Requirements
+
+| Requirement | Implementation |
+|---|---|
+| LLM | Llama 3.3 70B via Cloudflare Workers AI |
+| Workflow / Coordination | Cloudflare Workers + Agents SDK (Durable Objects) |
+| User Input via Chat | Real-time AI chat UI + flight search on Cloudflare Pages |
+| Memory / State | Durable Objects built-in SQL — persists tracked flights and chat history |
+
+---
+
 ## What It Does
 
-- Live 3D globe with every airborne plane on Earth rendered in real time
-- Real flight data powered by the OpenSky Network's free ADS-B API (no API key required)
+- Live 3D globe with every airborne plane rendered as a 3D aircraft model in real time
+- Real flight data powered by AviationStack API (live ADS-B data, updated every 15 seconds)
 - AI chat assistant powered by Llama 3.3 — ask anything about flights, routes, or airports
 - Persistent memory — bookmarked flights and chat history saved via Durable Objects
-- Search any flight by callsign (e.g. UAL123, BAW456, DLH400)
-- Click any plane to see real-time altitude, speed, heading, and origin country
+- Search any flight by callsign (e.g. TLM758, LOT728)
+- Click any plane to see real-time altitude, speed, heading, departure, and arrival
 
 ---
 
 ## Architecture
 
-| Assignment Requirement | Solution |
-|---|---|
-| LLM | Llama 3.3 70B via Cloudflare Workers AI |
-| Workflow / Coordination | Cloudflare Workers + Agents SDK (Durable Objects) |
-| User Input | Chat UI + flight search via Cloudflare Pages |
-| Memory / State | Durable Objects built-in SQL via Agents SDK |
+```
+AviationStack API  (polled every 15 seconds)
+        |
+Cloudflare Worker — FlightAgent (Durable Object)
+        |-- Caches flight state in Durable Object SQL
+        |-- GET  /flights  --> returns live flight data to frontend
+        |-- POST /chat     --> Llama 3.3 on Workers AI, returns AI reply
+        |-- POST /track    --> saves bookmarked callsigns to state
+        |-- GET  /tracked  --> returns saved callsigns
+        |
+Cloudflare Pages (frontend)
+        |-- Three.js 3D globe with real Earth texture
+        |-- 3D aircraft models built from Three.js geometries
+        |-- AI chat panel (bottom right)
+        |-- Click any plane for flight details
+```
 
 ---
 
@@ -33,51 +62,70 @@ Track every plane in the sky on an interactive 3D globe, chat with an AI assista
 | Layer | Technology |
 |---|---|
 | Backend Agent | Cloudflare Workers + Agents SDK |
-| AI Model | Llama 3.3 70B (Workers AI) |
+| AI Model | Llama 3.3 70B (Cloudflare Workers AI) |
 | State / Memory | Durable Objects (SQLite) |
-| Frontend | Vanilla JS + Three.js, hosted on Cloudflare Pages |
-| 3D Globe | Three.js r128 |
-| Flight Data | OpenSky Network REST API (free, no key needed) |
+| Frontend | Vanilla JS + Three.js r128 |
+| Hosting | Cloudflare Pages |
+| Flight Data | AviationStack REST API |
 
 ---
 
 ## Project Structure
 
 ```
-flight-tracker/
+cf_ai_flight-tracker/
 ├── README.md
 ├── worker/
 │   ├── package.json          # Worker dependencies
 │   ├── wrangler.jsonc        # Cloudflare config (AI binding + Durable Objects)
 │   └── src/
-│       └── index.ts          # Agent: OpenSky proxy, Llama 3.3 chat, state management
+│       └── index.ts          # Agent: AviationStack proxy, Llama 3.3 chat, state
 └── frontend/
     ├── index.html            # App shell and UI layout
-    ├── globe.js              # Three.js 3D globe, live plane sprites, drag/zoom/click
+    ├── globe.js              # Three.js 3D globe, 3D plane models, drag/zoom/click
     └── chat.js               # AI chat panel
 ```
 
 ---
 
-## Prerequisites
+## Running Locally
 
-- [Node.js](https://nodejs.org/) v18 or higher
-- A free [Cloudflare account](https://dash.cloudflare.com/sign-up)
-- Wrangler CLI — install with: `npm install -g wrangler`
+### Prerequisites
+- Node.js v18 or higher
+- A free Cloudflare account at dash.cloudflare.com
+- Wrangler CLI: `npm install -g wrangler`
+- An AviationStack API key (free at aviationstack.com)
+
+### 1. Clone the repo
+```bash
+git clone https://github.com/siddkarani/cf_ai_flight-tracker.git
+cd cf_ai_flight-tracker
+```
+
+### 2. Run the Worker locally
+```bash
+cd worker
+npm install
+npx wrangler login
+npx wrangler dev
+```
+
+The worker will run at `http://localhost:8787`
+
+### 3. Run the frontend locally
+Open a second terminal:
+```bash
+cd frontend
+npx serve .
+```
+
+Open `http://localhost:3000` in your browser. Make sure `WORKER_URL` in `globe.js` points to `http://localhost:8787`.
 
 ---
 
-## Deployment
+## Deploying to Cloudflare
 
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/YOUR_USERNAME/flight-tracker.git
-cd flight-tracker
-```
-
-### 2. Deploy the Worker (backend)
-
+### 1. Deploy the Worker
 ```bash
 cd worker
 npm install
@@ -85,92 +133,32 @@ npx wrangler login
 npx wrangler deploy
 ```
 
-After deploying, copy the worker URL shown in the terminal. It will look like:
-`https://flight-tracker-worker.YOUR_SUBDOMAIN.workers.dev`
+Copy the worker URL printed in the terminal (e.g. `https://flight-tracker-worker.YOUR_SUBDOMAIN.workers.dev`) and update `WORKER_URL` on line 2 of `frontend/globe.js`.
 
-### 3. Set the worker URL in the frontend
-
-Open `frontend/globe.js` and replace line 3:
-
-```js
-const WORKER_URL = "https://flight-tracker-worker.YOUR_SUBDOMAIN.workers.dev";
-```
-
-### 4. Deploy the frontend (Cloudflare Pages)
-
+### 2. Deploy the Frontend
 ```bash
-cd ../frontend
-npx wrangler pages deploy . --project-name=flight-tracker
-```
-
-Your app is now live on Cloudflare's global edge network.
-
----
-
-## Local Development
-
-```bash
-# Terminal 1 — run the worker locally
-cd worker
-npx wrangler dev
-
-# Terminal 2 — serve the frontend
 cd frontend
-npx serve .
-# Then open http://localhost:3000 in your browser
-# Make sure WORKER_URL in globe.js points to http://localhost:8787
+npx wrangler pages deploy . --project-name=cf-ai-flight-tracker
 ```
-
----
-
-## How It Works
-
-### Data Flow
-
-```
-OpenSky Network API  (polled every 12 seconds)
-        |
-Cloudflare Worker (FlightAgent)
-        |-- Caches flight state in Durable Object
-        |-- Serves /flights  --> frontend globe
-        |-- Serves /chat     --> Llama 3.3 on Workers AI
-        |-- Serves /track    --> saves bookmarked callsigns
-        |
-Three.js Globe (frontend)
-        |-- Renders live plane positions on rotating 3D Earth
-        |-- Click a plane    --> shows flight detail panel
-        |-- Chat panel       --> talks to AI with live flight context
-```
-
-### Flight Data
-
-The OpenSky Network API is free and requires no API key for anonymous access. It returns live ADS-B state vectors for every tracked aircraft globally, updated every 10–15 seconds. Typical coverage is 5,000–15,000 airborne flights at any given time.
-
-### AI Assistant
-
-The Llama 3.3 70B model is given a live snapshot of current flights as context on every request, so it can answer specific questions like:
-- "Which flights are currently over the North Atlantic?"
-- "What altitude is UAL123 flying at?"
-- "Which country does this flight originate from?"
-
-Chat history is persisted in the Durable Object so the assistant remembers context across the session.
 
 ---
 
 ## Cloudflare Bindings
 
-These are configured automatically via `wrangler.jsonc` — no manual setup needed.
+Configured automatically via `wrangler.jsonc` — no manual setup needed.
 
 | Binding | Purpose |
 |---|---|
-| `AI` | Workers AI — Llama 3.3 inference |
+| `AI` | Workers AI — Llama 3.3 70B inference |
 | `FlightAgent` | Durable Object — persistent state and chat memory |
 
 ---
 
-## Assignment Requirements
+## How to Use
 
-- LLM: Llama 3.3 70B on Cloudflare Workers AI
-- Workflow / Coordination: Cloudflare Workers Agent backed by Durable Objects
-- User Input via Chat: Real-time chat UI and flight search on Cloudflare Pages
-- Memory / State: Agent persists tracked flights and chat history in Durable Object SQL
+1. Open the live demo link above
+2. The globe loads automatically with all live flights shown as 3D aircraft
+3. Click any plane to see its details (airline, altitude, speed, heading, route)
+4. Use the search bar to find a specific flight by callsign
+5. Click "Track This Flight" to bookmark a flight — it will be highlighted in green
+6. Click the chat button (bottom right) to ask the AI assistant anything about flights
